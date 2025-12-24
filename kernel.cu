@@ -1,13 +1,10 @@
-﻿
-#include "cuda_runtime.h"
+﻿#include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
-#include <SFML\Graphics.hpp>
-//#include "C:\Users\Ionut\source\repos\CudaRuntime_Fractal\include\SFML\Graphics.hpp"
+#include <SFML/Graphics.hpp>
 
 #include <stdio.h>
 #include <iostream>
-#include <functional>
 #include <chrono>
 
 #define HEIGHT 1080
@@ -19,14 +16,12 @@
 
 #define PROCENT_DIRECTION_MOVEMENT 0.05f
 
-#define DEFAULT_PRINT P_TIME | P_COORDS | P_GPU
+#define DEFAULT_PRINT P_TIME | P_GPU
 
 #define V_ZOOM 0.1f
 #define DISTANCE_INIT_X 2.0f
 #define POZ_INIT_X -1.0f
 #define POZ_INIT_Y -1.0f
-
-
 
 struct set_color_info {
     int* a;
@@ -34,18 +29,23 @@ struct set_color_info {
     double start_x, start_y, end_x, end_y;
 };
 struct running_info {
-    int print = P_COORDS;
+    int print = DEFAULT_PRINT;
     bool test_GPU = true;
     int threadsPerBlock = 256;
+    int* gpu_reserved_memory;
 };
-
+bool init_running_info(running_info& info) {
+    auto e = cudaMalloc((void**)&info.gpu_reserved_memory, HEIGHT * WIDTH * sizeof(int));
+    if (e != cudaSuccess) {
+        fprintf(stderr, "cudaMalloc failed!");
+        cudaFree(info.gpu_reserved_memory);
+        return false;
+    }
+    return true;
+}
 int init_set_color_info(set_color_info& info) {
     info.a = (int*)malloc(HEIGHT * WIDTH * sizeof(int));
     info.nr = 1024;
-    /*info.p1 = -0.7361705050500805;
-    info.p2 = 0.14491345454543447;
-    info.des1 = -0.7361705050500401;
-    info.des2 = 0.14491345454547488;*/
     info.start_x = POZ_INIT_X;
     info.start_y = POZ_INIT_Y;
     info.end_x = DISTANCE_INIT_X + POZ_INIT_X;
@@ -56,21 +56,17 @@ int init_set_color_info(set_color_info& info) {
 __global__ void set_number_for_color_cuda(set_color_info info);
 
 cudaError_t set_number_for_color(set_color_info& info, running_info &r_info);
-cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image& image);
+cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image& image, double *gpu_calculation_time, double* set_pixels_time);
 
 cudaError_t display_GPU();
 
 cudaError_t set_number_for_color(set_color_info &info, running_info &r_info) {
     cudaError_t cudaStatus;
-
-    if (r_info.print & P_GPU) {
-        display_GPU();
-    }
     int threadsPerBlock = r_info.threadsPerBlock;
     int size = HEIGHT * WIDTH;
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
     set_color_info cuda_info = info;
-    cudaMalloc((void**)&cuda_info, size * sizeof(int));
+    cuda_info.a = r_info.gpu_reserved_memory;
     set_number_for_color_cuda << <blocksPerGrid, threadsPerBlock >> > (cuda_info);
     cudaStatus = cudaDeviceSynchronize();
     if (cudaStatus != cudaSuccess) {
@@ -79,9 +75,10 @@ cudaError_t set_number_for_color(set_color_info &info, running_info &r_info) {
     }
     cudaMemcpy(info.a, cuda_info.a, size * sizeof(int), cudaMemcpyDeviceToHost);
 Error:
+    //cudaFree(cuda_info.a);
     return cudaStatus;
 }
-cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image& image) {
+cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image& image, double *gpu_calculation_time, double* set_pixels_time) {
     auto start = std::chrono::high_resolution_clock::now();
     auto err = set_number_for_color(info, r_info);
     auto end_gpu = std::chrono::high_resolution_clock::now();
@@ -95,9 +92,11 @@ cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image&
         }
     }
     auto end_setPixel = std::chrono::high_resolution_clock::now();
-    if (r_info.print & P_TIME) {
-        std::cout << "GPU calculations = " << std::chrono::duration<double, std::milli>(end_gpu - start).count() / 1000 << '\n';
-        std::cout << "set pixels in image = " << std::chrono::duration<double, std::milli>(end_setPixel - end_gpu).count() / 1000 << '\n';
+    if (gpu_calculation_time != NULL) {
+        *gpu_calculation_time = std::chrono::duration<double, std::milli>(end_gpu - start).count() / 1000.0f;
+    }
+    if (set_pixels_time != NULL) {
+        *set_pixels_time = std::chrono::duration<double, std::milli>(end_setPixel - end_gpu).count() / 1000;
     }
     return err;
 }
@@ -132,19 +131,21 @@ void zoomInplace(set_color_info& color_info, double zoom);
 void zoomOnCoords(set_color_info& color_info, int mouse_x, int mouse_y, double zoom);
 void modeToDirection(set_color_info& color_info, double direction_p_x, double direction_p_y);
 
-
 int main(){
-    sf::RenderWindow window(sf::VideoMode({ WIDTH, HEIGHT }), "Window Title", sf::State::Fullscreen);
+    sf::RenderWindow window(sf::VideoMode({ WIDTH, HEIGHT }), "Fractal", sf::State::Fullscreen);
     sf::Image image(sf::Vector2u(WIDTH, HEIGHT), sf::Color::Black);
 
     set_color_info color_info;
     running_info running_info;
 
+    init_running_info(running_info);
     init_set_color_info(color_info);
 
     sf::Texture texture;
-    texture.loadFromImage(image);
+    bool texture_loaded = texture.loadFromImage(image);
+    if (!texture_loaded) { std::cout << "Error loading texture from image\n"; return -1;}
     sf::Sprite sprite(texture);
+    if (running_info.print & P_GPU){ display_GPU(); }
     while (window.isOpen()) {
         while (const std::optional event_ = window.pollEvent()) {
             const sf::Event& e = *event_;
@@ -184,33 +185,33 @@ int main(){
             if (const auto* mouseClick = e.getIf<sf::Event::MouseButtonPressed>()) {
                 sf::Vector2i v = mouseClick->position;
                 if (running_info.print & P_COORDS) {
-                    //std::cout << "mouse position = " << v.x << ' ' << v.y << '\n';
+                    std::cout << "mouse position = " << v.x << ' ' << v.y << '\n';
                 }
                 setCenerToMousePoz(v.y, v.x, color_info);
             }
             if (const auto* scroll = e.getIf<sf::Event::MouseWheelScrolled>()) {
                 sf::Vector2i v = sf::Mouse::getPosition();
                 int wheel = scroll->delta;
-                std::cout << "mouse position = " << v.x << ' ' << v.y << '\n';
-                //setCenerToMousePoz(v.y, v.x, color_info);
+                if (running_info.print & P_COORDS) {
+                    std::cout << "mouse position = " << v.x << ' ' << v.y << '\n';
+                }
                 if (wheel == 1) {
                     zoomOnCoords(color_info, v.y, v.x, 1.1);
                 }
                 else {
                     zoomOnCoords(color_info, v.y, v.x, 0.91);
                 }
-                
             }
         }
+
+        if (!window.isOpen()) { continue; }
+
+        double gpu_time, set_pixels_time;
+        set_image_GUP(color_info, running_info, image, &gpu_time, &set_pixels_time);
+
         auto start = std::chrono::high_resolution_clock::now();
 
-        if (!window.isOpen()) {
-            continue;
-        }
-
-        set_image_GUP(color_info, running_info, image);
-
-        texture.loadFromImage(image);
+        bool texture_loaded = texture.loadFromImage(image);
         sprite.setTexture(texture);
         window.clear();
         window.draw(sprite);
@@ -218,10 +219,9 @@ int main(){
 
         auto end = std::chrono::high_resolution_clock::now();
 
-        //std::cout << "Show image = " << std::chrono::duration<double, std::milli>(end - start).count() / 1000 << '\n';
-
-        if (running_info.print & P_TIME) {
-            std::cout << "Show image = " << std::chrono::duration<double, std::milli>(end - start).count() / 1000 << '\n';
+        if (running_info.print & P_TIME && texture_loaded) {
+            printf("gpu_calculation_time = %lf, set_pixels_time = %lf, display_time = %lf\n", gpu_time, set_pixels_time, 
+                std::chrono::duration<double, std::milli>(end - start).count() / 1000);
         }
     }
     return 0;
@@ -248,43 +248,27 @@ void mouseCoordsToRealValues(int mouse_x, int mouse_y, set_color_info& color_inf
     double procent_x = (double)mouse_x / HEIGHT;
     double procent_y = (double)mouse_y / WIDTH;
 
-    printf("%lf, %lf\n", procent_x, procent_y);
-
     poz_x = (color_info.end_x - color_info.start_x) * procent_x + color_info.start_x;
     poz_y = (color_info.end_y - color_info.start_y) * procent_y + color_info.start_y;
 }
 void centerOnRealPosition(set_color_info& color_info, double poz_x, double poz_y, double zoom) {
-
-    std::cout << poz_x << ' ' << poz_y << '\n';
-
     double d_x = (color_info.end_x - color_info.start_x) * zoom / 2;
     double d_y = (color_info.end_y - color_info.start_y) * zoom / 2;
-
-    std::cout << d_x << ' ' << d_y << '\n';
-    printf("%lf, %lf, %lf, %lf\n", color_info.start_x, color_info.start_y, color_info.end_x, color_info.end_y);
 
     color_info.start_x = poz_x - d_x;
     color_info.end_x = poz_x + d_x;
 
     color_info.start_y = poz_y - d_y;
     color_info.end_y = poz_y + d_y;
-
-    printf("%lf, %lf, %lf, %lf\n", color_info.start_x, color_info.start_y, color_info.end_x, color_info.end_y);
-
 }
 void zoomInplace(set_color_info& color_info, double zoom) {
     double d_x = (color_info.end_x - color_info.start_x) * (zoom - 1) / 2;
     double d_y = (color_info.end_y - color_info.start_y) * (zoom - 1) / 2;
 
-    printf("%lf, %lf, %lf, %lf\n", color_info.start_x, color_info.start_y, color_info.end_x, color_info.end_y);
-
     color_info.start_x -= d_x;
     color_info.end_x += d_x;
     color_info.start_y -= d_y;
     color_info.end_y += d_y;
-
-    printf("%lf, %lf, %lf, %lf\n", color_info.start_x, color_info.start_y, color_info.end_x, color_info.end_y);
-
 }
 void zoomOnCoords(set_color_info& color_info, int mouse_x, int mouse_y, double zoom) {
     double procent_x = (double)mouse_x / HEIGHT;
@@ -293,8 +277,6 @@ void zoomOnCoords(set_color_info& color_info, int mouse_x, int mouse_y, double z
     double d_x = (color_info.end_x - color_info.start_x) * (zoom - 1);
     double d_y = (color_info.end_y - color_info.start_y) * (zoom - 1);
 
-    printf("%lf, %lf, %lf, %lf\n", procent_x, procent_y, d_x, d_y);
-
     color_info.start_x -= d_x * procent_x;
     color_info.end_x += d_x * (1 - procent_x);
     color_info.start_y -= d_y * procent_y;
@@ -302,16 +284,12 @@ void zoomOnCoords(set_color_info& color_info, int mouse_x, int mouse_y, double z
 
 }
 void setCenerToMousePoz(int mouse_x, int mouse_y, set_color_info& color_info, double zoom) {
-    std::cout << "mormal mouse = " << mouse_x << ' ' << mouse_y << '\n';
     double poz_x, poz_y;
     mouseCoordsToRealValues(mouse_x, mouse_y, color_info, poz_x, poz_y);
-    std::cout << "real coords = " << poz_x << ' ' << poz_y << '\n';
     centerOnRealPosition(color_info, poz_x, poz_y);
 }
 void modeToDirection(set_color_info& color_info, double direction_p_x, double direction_p_y) {
     double poz_x, poz_y;
-    std::cout << " direcion = " << direction_p_x << ' ' << direction_p_y << '\n';
     mouseCoordsToRealValues(direction_p_x * HEIGHT, direction_p_y * WIDTH, color_info, poz_x, poz_y);
-    std::cout << "real coords = " << poz_x << ' ' << poz_y << '\n';
     centerOnRealPosition(color_info, poz_x, poz_y);
 }
