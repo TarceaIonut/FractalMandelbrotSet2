@@ -1,27 +1,19 @@
 ﻿#include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
+#include "project_constants.hpp"
+
+#include <deque>
+
 #include <SFML/Graphics.hpp>
 
 #include <stdio.h>
 #include <iostream>
 #include <chrono>
 
-#define HEIGHT 1080
-#define WIDTH 1920
 
-#define P_TIME 0x1
-#define P_COORDS 0x2
-#define P_GPU 0x4
-
-#define PROCENT_DIRECTION_MOVEMENT 0.05f
-
-#define DEFAULT_PRINT P_TIME | P_GPU
-
-#define V_ZOOM 0.1f
-#define DISTANCE_INIT_X 2.0f
-#define POZ_INIT_X -1.0f
-#define POZ_INIT_Y -1.0f
+struct set_color_info;
+struct running_info;
 
 struct set_color_info {
     int* a;
@@ -34,6 +26,77 @@ struct running_info {
     int threadsPerBlock = 256;
     int* gpu_reserved_memory;
 };
+
+class FPS {
+    public:
+        FPS(int nrOfChecks) {
+                this->nrOfChecks = nrOfChecks;
+                this->q = std::deque<long long>();
+        }
+        FPS() {
+                this->nrOfChecks = 20;
+                this->q = std::deque<long long>();
+        }
+        double getCurrentFPS() {
+                long long microseconds_since_epoch = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                q.push_front((long long)microseconds_since_epoch);
+
+                if (this->q.size() > this->nrOfChecks) {
+                        q.pop_back();
+                }
+
+                long long d = q.front() - q.back();
+                if (this->q.size() > 1 && d > 0) {
+                        return 1000000.0f * (this->q.size() - 1) / (double)d;
+                }
+                return 0.0f;
+        }
+    private:
+        int nrOfChecks;
+        std::deque<long long> q;
+    };
+class TextsToDisplay {
+private:
+    sf::Font font;
+    void init_text(sf::Text& text, sf::Vector2f position) {
+        text.setCharacterSize(S_TEXT);
+        text.setFont(font);
+        text.setFillColor(sf::Color(0, 0, 0));
+        text.setPosition(position);
+    }
+public:
+    sf::Text fps, time, coords;
+    TextsToDisplay():
+        font(),
+        fps(font), time(font), coords(font) 
+    {
+        auto opened = font.openFromFile("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf");
+        if (!opened) {
+            std::cout << "Error loading font\n";
+            return;
+        }
+        init_text(this->fps, {10.0f, 10.0f});
+        init_text(this->time, {10.0f, 10.0f + S_TEXT * 1.5f});
+        init_text(this->coords, {10.0f, 10.0f + S_TEXT * 5.0f});
+    }
+    void draw(sf::RenderWindow& window) {
+        window.draw(this->fps);
+        window.draw(this->time);
+        window.draw(this->coords);
+    }
+    void set_texts(double fps_, std::tuple<double,double,double> time, set_color_info& color_info) {
+        double time_gpu = std::get<0>(time);
+        double time_setPixels = std::get<1>(time);
+        double time_display = std::get<2>(time);
+        this->fps.setString("FPS: " + std::to_string(fps_));
+        this->time.setString("TIME GPU: " + std::to_string(time_gpu) + "s\nsetPixels: " + std::to_string(time_setPixels) 
+        + "s\ndisplay: " + std::to_string(time_display) + "s");
+        this->coords.setString("X: [" + std::to_string(color_info.start_x) + ", " + std::to_string(color_info.end_x) + "]\nY: [" +
+            std::to_string(color_info.start_y) + ", " + std::to_string(color_info.end_y) + "]\nMax iterations: " + std::to_string(color_info.nr));
+    }
+};
+
+
 bool init_running_info(running_info& info) {
     auto e = cudaMalloc((void**)&info.gpu_reserved_memory, HEIGHT * WIDTH * sizeof(int));
     if (e != cudaSuccess) {
@@ -49,7 +112,7 @@ int init_set_color_info(set_color_info& info) {
     info.start_x = POZ_INIT_X;
     info.start_y = POZ_INIT_Y;
     info.end_x = DISTANCE_INIT_X + POZ_INIT_X;
-    info.end_y = POZ_INIT_Y + DISTANCE_INIT_X;
+    info.end_y = POZ_INIT_Y + DISTANCE_INIT_X * ((double)WIDTH / (double)HEIGHT);
     return 0;
 }
 
@@ -136,16 +199,21 @@ int main(){
     sf::Image image(sf::Vector2u(WIDTH, HEIGHT), sf::Color::Black);
 
     set_color_info color_info;
-    running_info running_info;
+    running_info run_info;
 
-    init_running_info(running_info);
+    init_running_info(run_info);
     init_set_color_info(color_info);
 
     sf::Texture texture;
     bool texture_loaded = texture.loadFromImage(image);
     if (!texture_loaded) { std::cout << "Error loading texture from image\n"; return -1;}
     sf::Sprite sprite(texture);
-    if (running_info.print & P_GPU){ display_GPU(); }
+    if (run_info.print & P_GPU){ display_GPU(); }
+
+    FPS fps(20);
+
+    TextsToDisplay textsToDisplay{};
+
     while (window.isOpen()) {
         while (const std::optional event_ = window.pollEvent()) {
             const sf::Event& e = *event_;
@@ -184,7 +252,7 @@ int main(){
             }
             if (const auto* mouseClick = e.getIf<sf::Event::MouseButtonPressed>()) {
                 sf::Vector2i v = mouseClick->position;
-                if (running_info.print & P_COORDS) {
+                if (run_info.print & P_COORDS) {
                     std::cout << "mouse position = " << v.x << ' ' << v.y << '\n';
                 }
                 setCenerToMousePoz(v.y, v.x, color_info);
@@ -192,7 +260,7 @@ int main(){
             if (const auto* scroll = e.getIf<sf::Event::MouseWheelScrolled>()) {
                 sf::Vector2i v = sf::Mouse::getPosition();
                 int wheel = scroll->delta;
-                if (running_info.print & P_COORDS) {
+                if (run_info.print & P_COORDS) {
                     std::cout << "mouse position = " << v.x << ' ' << v.y << '\n';
                 }
                 if (wheel == 1) {
@@ -206,24 +274,33 @@ int main(){
 
         if (!window.isOpen()) { continue; }
 
-        double gpu_time, set_pixels_time;
-        set_image_GUP(color_info, running_info, image, &gpu_time, &set_pixels_time);
-
         auto start = std::chrono::high_resolution_clock::now();
+
+        double gpu_time, set_pixels_time;
+        set_image_GUP(color_info, run_info, image, &gpu_time, &set_pixels_time);
+
+        auto end = std::chrono::high_resolution_clock::now();
+        double display_time = std::chrono::duration<double, std::milli>(end - start).count() / 1000;
+        
 
         bool texture_loaded = texture.loadFromImage(image);
         sprite.setTexture(texture);
         window.clear();
         window.draw(sprite);
+        textsToDisplay.set_texts(fps.getCurrentFPS(), {gpu_time, set_pixels_time, display_time}, color_info);
+        textsToDisplay.draw(window);
         window.display();
 
-        auto end = std::chrono::high_resolution_clock::now();
+        
 
-        if (running_info.print & P_TIME && texture_loaded) {
-            printf("gpu_calculation_time = %lf, set_pixels_time = %lf, display_time = %lf\n", gpu_time, set_pixels_time, 
-                std::chrono::duration<double, std::milli>(end - start).count() / 1000);
+        if (run_info.print & P_TIME && texture_loaded) {
+            printf("gpu_calculation_time = %lf, set_pixels_time = %lf, display_time = %lf\n", gpu_time, set_pixels_time, display_time);
+        }
+        if (run_info.print & P_FPS) {
+            printf("FPS: %lf\n", fps.getCurrentFPS());
         }
     }
+    cudaFree(run_info.gpu_reserved_memory);
     return 0;
 }
 cudaError_t display_GPU() {
