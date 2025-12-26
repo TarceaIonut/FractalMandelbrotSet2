@@ -18,7 +18,8 @@ struct running_info;
 enum FRACTAL {
     MANDELBROT = 0,
     NEWTON = 1,
-    MAGNET = 2
+    MAGNET = 2,
+    PHOENIX = 3
 };
 
 struct set_color_info {
@@ -53,6 +54,9 @@ struct complex {
         return { (real * other.real + imag * other.imag) / down,
                  (imag * other.real - real * other.imag) / down };
     }
+    __host__ __device__ inline double size2() {
+		return real * real + imag * imag;
+	}
 };
 class FPS {
     public:
@@ -133,6 +137,9 @@ public:
             case MAGNET:
                 fractal_name = "MAGNET";
                 break;
+            case PHOENIX:
+                fractal_name = "PHOENIX";
+                break;
         }
         this->current_fractal.setString("Fractal: " + fractal_name);
     }
@@ -160,6 +167,7 @@ int init_set_color_info(set_color_info& info) {
 __global__ void set_number_for_color_cuda(set_color_info info);
 __global__ void set_number_for_color_newton(set_color_info info);
 __global__ void set_number_for_color_magnet(set_color_info info);
+__global__ void set_number_for_color_phoenix(set_color_info info);
 
 cudaError_t set_number_for_color(set_color_info& info, running_info &r_info, FRACTAL fractal_type);
 cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image& image, FRACTAL fractal_type,
@@ -242,6 +250,9 @@ int main(){
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F3)) {
                     fractal_type = MAGNET;
                 }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F4)) {
+                    fractal_type = PHOENIX;
+                }
             }
             if (const auto* mouseClick = e.getIf<sf::Event::MouseButtonPressed>()) {
                 sf::Vector2i v = mouseClick->position;
@@ -315,7 +326,11 @@ cudaError_t set_number_for_color(set_color_info &info, running_info &r_info, FRA
     case MAGNET:
         set_number_for_color_magnet << <blocksPerGrid, threadsPerBlock >> > (cuda_info);
         break;
+    case PHOENIX:
+        set_number_for_color_phoenix << <blocksPerGrid, threadsPerBlock >> > (cuda_info);
+        break;
     default:
+    
         return cudaErrorInvalidValue;
     }
     cudaStatus = cudaDeviceSynchronize();
@@ -444,6 +459,32 @@ __global__ void set_number_for_color_magnet(set_color_info info) {
         next = next * next;
         current = next;
         if (current.size() > 1e10) {
+            info.a[number] = k;
+            return;
+        }
+    }
+    info.a[number] = info.nr / 2;
+}
+__global__ void set_number_for_color_phoenix(set_color_info info) {
+    int number = blockIdx.x * blockDim.x + threadIdx.x;
+    if (number >= HEIGHT * WIDTH) {
+        return;
+    }
+    int x = number / WIDTH;
+    int y = number % WIDTH;
+    double imag = ((double)x / HEIGHT) * (info.end_x - info.start_x) + info.start_x;
+    double real = ((double)y / WIDTH) * (info.end_y - info.start_y) + info.start_y;
+    complex c{0.5667, 0.0};
+    complex p{-0.5, 0.0};
+    complex current{ real, imag };
+    complex next;
+    complex previous;
+
+    for (int k = 0; k < info.nr; k++) {
+        next = current * current + c + p * previous;
+        previous = current;
+        current = next;
+        if (current.size2() > (double)1'000'000'000'000.0) {
             info.a[number] = k;
             return;
         }
