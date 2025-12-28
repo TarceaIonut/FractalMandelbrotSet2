@@ -10,17 +10,36 @@
 #include <stdio.h>
 #include <iostream>
 #include <chrono>
+#include <map>
 
+#define NEW_FRACTAL(name) Fractal(#name, set_number_for_color_##name)
+#define FRACTALS_INSERT(fractals, name) fractals.push_back(NEW_FRACTAL(name));
+
+#define EXPAND(...) EXPAND4(EXPAND4(EXPAND4(EXPAND4(__VA_ARGS__))))
+#define EXPAND4(...) EXPAND3(EXPAND3(EXPAND3(EXPAND3(__VA_ARGS__))))
+#define EXPAND3(...) EXPAND2(EXPAND2(EXPAND2(EXPAND2(__VA_ARGS__))))
+#define EXPAND2(...) EXPAND1(EXPAND1(EXPAND1(EXPAND1(__VA_ARGS__))))
+#define EXPAND1(...) __VA_ARGS__
+
+#define PARENS ()
+
+#define FOR_EACH_HELPER(macro, name, ...) \
+  macro(name) \
+  __VA_OPT__(FOR_EACH_AGAIN PARENS (macro, __VA_ARGS__))
+
+#define FOR_EACH_AGAIN() FOR_EACH_HELPER
+
+#define APPLY_ALL(macro, ...) \
+  EXPAND(FOR_EACH_HELPER(macro, __VA_ARGS__))
+
+#define ALL_FRACTALS mandelbrot, newton, magnet, phoenix
+
+#define NR_FKEYS 12
 
 struct set_color_info;
 struct running_info;
 
-enum FRACTAL {
-    MANDELBROT = 0,
-    NEWTON = 1,
-    MAGNET = 2,
-    PHOENIX = 3
-};
+
 
 struct set_color_info {
     int* a;
@@ -33,6 +52,11 @@ struct running_info {
     int threadsPerBlock = 256;
     int* gpu_reserved_memory;
 };
+
+__global__ void set_number_for_color_mandelbrot(set_color_info info);
+__global__ void set_number_for_color_newton(set_color_info info);
+__global__ void set_number_for_color_magnet(set_color_info info);
+__global__ void set_number_for_color_phoenix(set_color_info info);
 
 struct complex {
 	double real = 0;
@@ -86,6 +110,58 @@ class FPS {
         int nrOfChecks;
         std::deque<long long> q;
     };
+class Fractals{
+    class Fractal {
+        public:
+            std::string name;
+            Fractal(std::string name, __global__ void (*cuda_run)(set_color_info info)) : name(name), cuda_run(cuda_run) {}
+            void run(set_color_info &info, int blocksPerGrid, int threadsPerBlock) {
+                cuda_run<<<blocksPerGrid, threadsPerBlock>>>(info);
+            }
+        private:
+            __global__ void (*cuda_run)(set_color_info info);
+    };
+public:
+    std::vector<Fractal> fractals;
+    int inner_counter = 0;
+    Fractals() {
+        fractals.reserve(10);
+        #define PUSH_FR(fr_name, n) fr_name.push_back(NEW_FRACTAL(n));
+        #define PUSH_FR_VEC(n) PUSH_FR(fractals, n)
+        APPLY_ALL(PUSH_FR_VEC, ALL_FRACTALS);
+        #undef PUSH_FR
+        #undef PUSH_FR_VEC
+    }
+    void insert(Fractal &fr) {
+        fractals.push_back(fr);
+    }
+    void go_up() {
+        if (inner_counter < (int)fractals.size() - 1) {
+            inner_counter++;
+        }
+        else {
+            inner_counter = 0;
+        }
+    }
+    void go_down() {
+        if (inner_counter > 0) {
+            inner_counter--;
+        }
+        else {
+            inner_counter = (int)fractals.size() - 1;
+        }
+    }
+    void execute_current(set_color_info info, int blocksPerGrid, int threadsPerBlock) {
+        fractals[inner_counter].run(info, blocksPerGrid, threadsPerBlock);
+    }
+    bool pick_specific(int index) {
+        if (index < 0 || index >= (int)fractals.size()) {
+            return false;
+        }
+        inner_counter = index;
+        return true;
+    }
+};
 class TextsToDisplay {
 private:
     sf::Font font;
@@ -117,7 +193,7 @@ public:
         window.draw(this->coords);
         window.draw(this->current_fractal);
     }
-    void set_texts(double fps_, std::tuple<double,double,double> time, set_color_info& color_info, FRACTAL fractal_type) {
+    void set_texts(double fps_, std::tuple<double,double,double> time, set_color_info& color_info, Fractals &Fractals) {
         double time_gpu = std::get<0>(time);
         double time_setPixels = std::get<1>(time);
         double time_display = std::get<2>(time);
@@ -127,20 +203,7 @@ public:
         this->coords.setString("X: [" + std::to_string(color_info.start_x) + ", " + std::to_string(color_info.end_x) + "]\nY: [" +
             std::to_string(color_info.start_y) + ", " + std::to_string(color_info.end_y) + "]\nMax iterations: " + std::to_string(color_info.nr));
         std::string fractal_name;
-        switch (fractal_type) {
-            case MANDELBROT:
-                fractal_name = "MANDELBROT";
-                break;
-            case NEWTON:
-                fractal_name = "NEWTON";
-                break;
-            case MAGNET:
-                fractal_name = "MAGNET";
-                break;
-            case PHOENIX:
-                fractal_name = "PHOENIX";
-                break;
-        }
+        fractal_name = Fractals.fractals[Fractals.inner_counter].name;
         this->current_fractal.setString("Fractal: " + fractal_name);
     }
 };
@@ -164,13 +227,10 @@ int init_set_color_info(set_color_info& info) {
     return 0;
 }
 
-__global__ void set_number_for_color_cuda(set_color_info info);
-__global__ void set_number_for_color_newton(set_color_info info);
-__global__ void set_number_for_color_magnet(set_color_info info);
-__global__ void set_number_for_color_phoenix(set_color_info info);
 
-cudaError_t set_number_for_color(set_color_info& info, running_info &r_info, FRACTAL fractal_type);
-cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image& image, FRACTAL fractal_type,
+
+cudaError_t set_number_for_color(set_color_info& info, running_info &r_info, Fractals& fractals);
+cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image& image, Fractals& fractals,
     double *gpu_calculation_time, double* set_pixels_time);
 
 cudaError_t display_GPU();
@@ -183,6 +243,9 @@ void zoomInplace(set_color_info& color_info, double zoom);
 void zoomOnCoords(set_color_info& color_info, int mouse_x, int mouse_y, double zoom);
 void modeToDirection(set_color_info& color_info, double direction_p_x, double direction_p_y);
 void normalizeCoordinates(set_color_info& color_info);
+
+void do_for_fkey(sf::Keyboard::Key key, Fractals& fractals);
+int from_key_to_index(sf::Keyboard::Key key, sf::Keyboard::Key start, sf::Keyboard::Key end);
 
 int main(){
     sf::RenderWindow window(sf::VideoMode({ WIDTH, HEIGHT }), "Fractal", sf::State::Fullscreen);
@@ -201,10 +264,8 @@ int main(){
     if (run_info.print & P_GPU){ display_GPU(); }
 
     FPS fps(20);
-
     TextsToDisplay textsToDisplay{};
-
-    FRACTAL fractal_type = MANDELBROT;
+    Fractals fractals{};
 
     while (window.isOpen()) {
         while (const std::optional event_ = window.pollEvent()) {
@@ -242,16 +303,40 @@ int main(){
                         color_info.nr /= 2;
                 }
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F1)) {
-                    fractal_type = MANDELBROT;
+                    fractals.go_down();
                 }
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F2)) {
-                    fractal_type = NEWTON;
+                    fractals.go_up();
                 }
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F3)) {
-                    fractal_type = MAGNET;
+                    do_for_fkey(sf::Keyboard::Key::F3, fractals);
                 }
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F4)) {
-                    fractal_type = PHOENIX;
+                    do_for_fkey(sf::Keyboard::Key::F4, fractals);
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F5)) {
+                    do_for_fkey(sf::Keyboard::Key::F5, fractals);
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F6)) {
+                    do_for_fkey(sf::Keyboard::Key::F6, fractals);
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F7)) {
+                    do_for_fkey(sf::Keyboard::Key::F7, fractals);   
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F8)) {
+                    do_for_fkey(sf::Keyboard::Key::F8, fractals);
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F9)) {
+                    do_for_fkey(sf::Keyboard::Key::F9, fractals);
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F10)) {
+                    do_for_fkey(sf::Keyboard::Key::F10, fractals);
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F11)){
+                    do_for_fkey(sf::Keyboard::Key::F11, fractals);
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F12)) {
+                    do_for_fkey(sf::Keyboard::Key::F12, fractals);
                 }
             }
             if (const auto* mouseClick = e.getIf<sf::Event::MouseButtonPressed>()) {
@@ -281,7 +366,7 @@ int main(){
         auto start = std::chrono::high_resolution_clock::now();
 
         double gpu_time, set_pixels_time;
-        set_image_GUP(color_info, run_info, image, fractal_type, &gpu_time, &set_pixels_time);
+        set_image_GUP(color_info, run_info, image, fractals , &gpu_time, &set_pixels_time);
 
         normalizeCoordinates(color_info);
 
@@ -292,7 +377,7 @@ int main(){
             sprite.setTexture(texture);
             window.clear();
             window.draw(sprite);
-            textsToDisplay.set_texts(fps.getCurrentFPS(), {gpu_time, set_pixels_time, display_time}, color_info, fractal_type);
+            textsToDisplay.set_texts(fps.getCurrentFPS(), {gpu_time, set_pixels_time, display_time}, color_info, fractals);
             textsToDisplay.draw(window);
             window.display();
 
@@ -307,32 +392,29 @@ int main(){
     cudaFree(run_info.gpu_reserved_memory);
     return 0;
 }
+void do_for_fkey(sf::Keyboard::Key key, Fractals& fractals) {
+    int index = from_key_to_index(key, sf::Keyboard::Key::F3, sf::Keyboard::Key::F12);
+    if (index != -1) {
+        fractals.pick_specific(index);
+    }
+}
+int from_key_to_index(sf::Keyboard::Key key, sf::Keyboard::Key start, sf::Keyboard::Key end) {
+    if (key >= start && key <= end) {
+        return (int)(static_cast<int>(key) - static_cast<int>(start));
+    }
+    else {
+        return -1;
+    }
+}
 
-cudaError_t set_number_for_color(set_color_info &info, running_info &r_info, FRACTAL fractal_type) {
+cudaError_t set_number_for_color(set_color_info &info, running_info &r_info, Fractals& fractals) {
     cudaError_t cudaStatus;
     int threadsPerBlock = r_info.threadsPerBlock;
     int size = HEIGHT * WIDTH;
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
     set_color_info cuda_info = info;
     cuda_info.a = r_info.gpu_reserved_memory;
-    switch (fractal_type)
-    {
-    case MANDELBROT:
-        set_number_for_color_cuda << <blocksPerGrid, threadsPerBlock >> > (cuda_info);
-        break;
-    case NEWTON:
-        set_number_for_color_newton << <blocksPerGrid, threadsPerBlock >> > (cuda_info);
-        break;
-    case MAGNET:
-        set_number_for_color_magnet << <blocksPerGrid, threadsPerBlock >> > (cuda_info);
-        break;
-    case PHOENIX:
-        set_number_for_color_phoenix << <blocksPerGrid, threadsPerBlock >> > (cuda_info);
-        break;
-    default:
-    
-        return cudaErrorInvalidValue;
-    }
+    fractals.execute_current(cuda_info, blocksPerGrid, threadsPerBlock);
     cudaStatus = cudaDeviceSynchronize();
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching set_number_for_color_cuda!\n", cudaStatus);
@@ -343,10 +425,10 @@ Error:
     //cudaFree(cuda_info.a);
     return cudaStatus;
 }
-cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image& image, FRACTAL fractal_type,
+cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image& image, Fractals& fractals,
     double *gpu_calculation_time, double* set_pixels_time) {
     auto start = std::chrono::high_resolution_clock::now();
-    auto err = set_number_for_color(info, r_info, fractal_type);
+    auto err = set_number_for_color(info, r_info, fractals);
     auto end_gpu = std::chrono::high_resolution_clock::now();
     int pixel_nr = 0;
     for (int x = 0; x < HEIGHT; x++) {
@@ -367,7 +449,7 @@ cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image&
     return err;
 }
 
-__global__ void set_number_for_color_cuda(set_color_info info) {
+__global__ void set_number_for_color_mandelbrot(set_color_info info) {
     int number = blockIdx.x * blockDim.x + threadIdx.x;
     if (number >= HEIGHT * WIDTH) {
         return;
@@ -560,7 +642,6 @@ void modeToDirection(set_color_info& color_info, double direction_p_x, double di
     mouseCoordsToRealValues(direction_p_x * HEIGHT, direction_p_y * WIDTH, color_info, poz_x, poz_y);
     centerOnRealPosition(color_info, poz_x, poz_y);
 }
-
 void normalizeCoordinates(set_color_info& color_info) {
     if (color_info.start_x > color_info.end_x) {
         double aux = color_info.start_x;
