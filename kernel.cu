@@ -32,14 +32,36 @@
 #define APPLY_ALL(macro, ...) \
   EXPAND(FOR_EACH_HELPER(macro, __VA_ARGS__))
 
-#define ALL_FRACTALS mandelbrot, newton, magnet, phoenix
+#define ALL_FRACTALS mandelbrot, newton, magnet, phoenix, burning_ship, mandelbrot_swich, mandelbrot_1_75, julia
 
-#define NR_FKEYS 12
+#define EVAL(...) __VA_ARGS__
+#define STRIP_PARENS(X) EVAL X
+#define CUDA_FRACTAL_GET_NEXT(max_nr, implementation, ...)                     \
+    int number = blockIdx.x * blockDim.x + threadIdx.x;                                                 \
+    if (number >= HEIGHT * WIDTH) {                                                                     \
+        return;                                                                                         \
+    }                                                                                                   \
+    int x = number / WIDTH;                                                                             \
+    int y = number % WIDTH;                                                                             \
+    double imag = ((double)x / (double)HEIGHT) * (info.end_x - info.start_x) + info.start_x;                    \
+    double real = ((double)y / (double)WIDTH) * (info.end_y - info.start_y) + info.start_y;                     \
+    __VA_ARGS__                                                         \
+    complex next;                                                       \
+    for (int k = 0; k < info.nr; k++) {                                 \
+        implementation                                                  \
+        if (current.size2() > (double)max_nr) {                         \
+            info.a[number] = k;                                         \
+            return;                                                     \
+        }                                                               \
+    }                                                                   \
+    info.a[number] = info.nr / 2;
+    
+#define CUDA_FRACTAL_PREV_GET_NEXT(max_nr, implementation, ...)                                       \
+    CUDA_FRACTAL_GET_NEXT( max_nr, implementation current = next; , complex current;__VA_ARGS__) \
+
 
 struct set_color_info;
 struct running_info;
-
-
 
 struct set_color_info {
     int* a;
@@ -57,6 +79,10 @@ __global__ void set_number_for_color_mandelbrot(set_color_info info);
 __global__ void set_number_for_color_newton(set_color_info info);
 __global__ void set_number_for_color_magnet(set_color_info info);
 __global__ void set_number_for_color_phoenix(set_color_info info);
+__global__ void set_number_for_color_burning_ship(set_color_info info);
+__global__ void set_number_for_color_mandelbrot_swich(set_color_info info);
+__global__ void set_number_for_color_mandelbrot_1_75(set_color_info info);
+__global__ void set_number_for_color_julia(set_color_info info);
 
 struct complex {
 	double real = 0;
@@ -68,7 +94,7 @@ struct complex {
 		return { real * other.real - imag * other.imag, real * other.imag + imag * other.real };
 	}
 	__host__ __device__ inline double size() {
-		return sqrt(real * real + imag * imag);
+		return std::sqrt(real * real + imag * imag);
 	}
     __host__ __device__ inline complex operator-(complex other) {
         return { real - other.real, imag - other.imag };
@@ -81,6 +107,55 @@ struct complex {
     __host__ __device__ inline double size2() {
 		return real * real + imag * imag;
 	}
+    __host__ __device__ inline complex operator*=(double scalar) {
+        this->real *= scalar;
+        this->imag *= scalar;
+        return *this;
+    }
+    __host__ __device__ inline complex operator*(double scalar) {
+        return complex{ this->real * scalar, this->imag * scalar };
+    }
+    __host__ __device__ inline complex abs() {
+        double r = real;
+        double i = imag;
+        if (r < 0) r = -r;
+        if (i < 0) i = -i;
+        return complex{ r, i };
+    }
+    __host__ __device__ inline complex sqrt() {
+        double r_real = std::sqrt((this->size() + this->real) / 2);
+        double r_imag = std::sqrt((this->size() - this->real) / 2);
+        if (this->imag < 0) r_imag = -r_imag;
+        return complex{ r_real, r_imag };
+    }
+    __host__ __device__ inline complex pow(double power) {
+        int int_part = (int)power;
+        power -= int_part;
+        complex r = this->pow_int(int_part);
+        complex s = *this;
+        double frac_pow = 1.0;
+        for (int i = 0; i < 5; i++) {
+            s = s.sqrt();
+            frac_pow *= 0.5;
+            if (power >= frac_pow) {
+                r = r * s;
+                power -= frac_pow;
+            }
+        }
+        return r;
+    }
+    __host__ __device__ inline complex pow_int(int power) {
+        complex result{1, 0};
+        complex base = *this;
+        while (power) {
+            if (power & 1) {
+                result = result * base;
+            }
+            base = base * base;
+            power >>= 1;
+        }
+        return result;
+    }
 };
 class FPS {
     public:
@@ -114,12 +189,12 @@ class Fractals{
     class Fractal {
         public:
             std::string name;
-            Fractal(std::string name, __global__ void (*cuda_run)(set_color_info info)) : name(name), cuda_run(cuda_run) {}
+            Fractal(std::string name, void (*cuda_run)(set_color_info info)) : name(name), cuda_run(cuda_run) {}
             void run(set_color_info &info, int blocksPerGrid, int threadsPerBlock) {
                 cuda_run<<<blocksPerGrid, threadsPerBlock>>>(info);
             }
         private:
-            __global__ void (*cuda_run)(set_color_info info);
+            void (*cuda_run)(set_color_info info);
     };
 public:
     std::vector<Fractal> fractals;
@@ -450,128 +525,105 @@ cudaError_t set_image_GUP(set_color_info& info, running_info& r_info, sf::Image&
 }
 
 __global__ void set_number_for_color_mandelbrot(set_color_info info) {
-    int number = blockIdx.x * blockDim.x + threadIdx.x;
-    if (number >= HEIGHT * WIDTH) {
-        return;
-    }
-    int x = number / WIDTH;
-    int y = number % WIDTH;
-    double imag = ((double)x / HEIGHT) * (info.end_x - info.start_x) + info.start_x;
-    double real = ((double)y / WIDTH) * (info.end_y - info.start_y) + info.start_y;
-    double r = 0;
-    double im = 0;
-    for (int k = 0; k < info.nr; k++) {
-        double x = r * r - im * im + real;
-        double y = 2.0 * r * im + imag;
-        r = x;
-        im = y;
-        if (r * r + im * im > (double)1'000'000'000'000.0) {
-            info.a[number] = k;
-            return;
-        }
-    }
-    info.a[number] = info.nr / 2;
+    CUDA_FRACTAL_PREV_GET_NEXT(
+        1.0e12, 
+        next = current * current + c;, 
+        complex c{ real, imag }; 
+    )
 }
 __global__ void set_number_for_color_newton(set_color_info info) {
     int number = blockIdx.x * blockDim.x + threadIdx.x;
     if (number >= HEIGHT * WIDTH) return;
-
     int row = number / WIDTH;
     int col = number % WIDTH;
-
-    // Map pixels to complex plane
     double cur_im = ((double)row / HEIGHT) * (info.end_x - info.start_x) + info.start_x;
     double cur_re = ((double)col / WIDTH) * (info.end_y - info.start_y) + info.start_y;
-
     for (int k = 0; k < info.nr; k++) {
-        // We need to calculate z = z - (z^3 - 1) / (3 * z^2)
-        
-        // 1. Calculate z^2
         double z2_re = cur_re * cur_re - cur_im * cur_im;
         double z2_im = 2.0 * cur_re * cur_im;
-
-        // 2. Calculate f(z) = z^3 - 1
         double f_re = (z2_re * cur_re - z2_im * cur_im) - 1.0;
         double f_im = z2_re * cur_im + z2_im * cur_re;
-
-        // 3. Calculate f'(z) = 3 * z^2
         double fd_re = 3.0 * z2_re;
         double fd_im = 3.0 * z2_im;
-
-        // 4. Complex Division: (f_re + f_im) / (fd_re + fd_im)
         double denom = fd_re * fd_re + fd_im * fd_im;
-        if (denom < 1e-12) break; // Avoid division by zero
-
+        if (denom < 1e-12) break; 
         double step_re = (f_re * fd_re + f_im * fd_im) / denom;
         double step_im = (f_im * fd_re - f_re * fd_im) / denom;
-
-        // 5. Update z
         cur_re -= step_re;
         cur_im -= step_im;
-
-        // 6. Check for convergence (if step is tiny, we found a root)
         if (step_re * step_re + step_im * step_im < 1e-12) {
-            // Color based on WHICH root it found
-            // Root 1 is at (1, 0). Root 2 at (-0.5, 0.866). Root 3 at (-0.5, -0.866).
-            if (cur_re > 0.0) info.a[number] = 1;      // Color A
-            else if (cur_im > 0.0) info.a[number] = 2; // Color B
-            else info.a[number] = 3;                   // Color C
-            
-            // Optional: Mix in 'k' to show how fast it converged (shading)
-            // info.a[number] = (info.a[number] * 100) + k; 
+            if (cur_re > 0.0) info.a[number] = 1;
+            else if (cur_im > 0.0) info.a[number] = 2; 
+            else info.a[number] = 3;
             return;
         }
     }
-    info.a[number] = 0; // Did not converge
+    info.a[number] = 0;
 }
 __global__ void set_number_for_color_magnet(set_color_info info) {
-    int number = blockIdx.x * blockDim.x + threadIdx.x;
-    if (number >= HEIGHT * WIDTH) return;
-    int x = number / WIDTH;
-    int y = number % WIDTH;
-    double imag = ((double)x / HEIGHT) * (info.end_x - info.start_x) + info.start_x;
-    double real = ((double)y / WIDTH) * (info.end_y - info.start_y) + info.start_y;
-    complex c{ real, imag };
-    complex current;
-    complex next;
-    for (int k = 0; k < info.nr; k++) {
-        complex upper = current * current + c - complex{1, 0};
-        complex lower = complex{ 2, 0 } * current + c - complex{ 2, 0 };
-        next = upper / lower;
-        next = next * next;
-        current = next;
-        if (current.size() > 1e10) {
-            info.a[number] = k;
-            return;
-        }
-    }
-    info.a[number] = info.nr / 2;
+    CUDA_FRACTAL_PREV_GET_NEXT(
+        1.0e12,
+            upper = current * current + c - up_v;
+            lower = down_v * current + c - down_v;
+            next = upper / lower;
+            next = next * next;
+        ,
+        complex up_v{1, 0};
+        complex down_v{2, 0};
+        complex upper, lower;
+        complex c{ real, imag };
+    )
 }
 __global__ void set_number_for_color_phoenix(set_color_info info) {
-    int number = blockIdx.x * blockDim.x + threadIdx.x;
-    if (number >= HEIGHT * WIDTH) {
-        return;
-    }
-    int x = number / WIDTH;
-    int y = number % WIDTH;
-    double imag = ((double)x / HEIGHT) * (info.end_x - info.start_x) + info.start_x;
-    double real = ((double)y / WIDTH) * (info.end_y - info.start_y) + info.start_y;
-    complex c{0.5667, 0.0};
-    complex p{-0.5, 0.0};
-    complex current{ real, imag };
-    complex next;
-    complex previous;
-
-    for (int k = 0; k < info.nr; k++) {
-        next = current * current + c + p * previous;
-        previous = current;
-        current = next;
-        if (current.size2() > (double)1'000'000'000'000.0) {
-            info.a[number] = k;
-            return;
-        }
-    }
-    info.a[number] = info.nr / 2;
+    CUDA_FRACTAL_GET_NEXT(
+            1.0e12
+        ,      
+            next = current * current + c + p * previous;
+            previous = current;
+            current = next;                                
+        ,   
+            complex c{0.5767, 0.0}; 
+            complex p{-0.5, 0.0};
+            complex current{real, imag};
+            complex previous;
+    )
+}
+__global__ void set_number_for_color_burning_ship(set_color_info info) {
+    CUDA_FRACTAL_PREV_GET_NEXT(
+        1.0e20, 
+        abs = current.abs();
+        next = abs * abs + c;, 
+        complex c{ real, imag }; 
+        complex abs;
+    )
+}
+__global__ void set_number_for_color_mandelbrot_swich(set_color_info info) {
+    CUDA_FRACTAL_PREV_GET_NEXT(
+        1.0e12, 
+        if (k % 2 == 0)
+            next = current * current + c;
+        else 
+            next = current * current - c;, 
+        complex c{ real, imag }; 
+    )
+}
+__global__ void set_number_for_color_mandelbrot_1_75(set_color_info info) {
+    CUDA_FRACTAL_PREV_GET_NEXT(
+        1.0e12, 
+        s = current.sqrt();
+        next = current * s * s.sqrt() + c;, 
+        complex c{ real, imag }, s; 
+    )
+}
+__global__ void set_number_for_color_julia(set_color_info info) {
+    info.nr = 1;
+    CUDA_FRACTAL_PREV_GET_NEXT(
+        10.0, 
+        next = current * current * current - one;, 
+        complex one{1, 0}; 
+        current.real = real;
+        current.imag = imag;
+    )
 }
 
 cudaError_t display_GPU() {
