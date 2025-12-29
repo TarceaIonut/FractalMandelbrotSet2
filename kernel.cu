@@ -32,7 +32,7 @@
 #define APPLY_ALL(macro, ...) \
   EXPAND(FOR_EACH_HELPER(macro, __VA_ARGS__))
 
-#define ALL_FRACTALS mandelbrot, newton, magnet, phoenix, burning_ship, mandelbrot_swich, mandelbrot_1_75, julia
+#define ALL_FRACTALS mandelbrot, newton, magnet, phoenix, burning_ship, mandelbrot_swich, mandelbrot_1_75, mj_variant
 
 #define EVAL(...) __VA_ARGS__
 #define STRIP_PARENS(X) EVAL X
@@ -83,6 +83,7 @@ __global__ void set_number_for_color_burning_ship(set_color_info info);
 __global__ void set_number_for_color_mandelbrot_swich(set_color_info info);
 __global__ void set_number_for_color_mandelbrot_1_75(set_color_info info);
 __global__ void set_number_for_color_julia(set_color_info info);
+__global__ void set_number_for_color_mj_variant(set_color_info info);
 
 struct complex {
 	double real = 0;
@@ -294,7 +295,7 @@ bool init_running_info(running_info& info) {
 }
 int init_set_color_info(set_color_info& info) {
     info.a = (int*)malloc(HEIGHT * WIDTH * sizeof(int));
-    info.nr = 128;
+    info.nr = 256;
     info.start_x = POZ_INIT_X;
     info.start_y = POZ_INIT_Y;
     info.end_x = DISTANCE_INIT_X + POZ_INIT_X;
@@ -321,6 +322,8 @@ void normalizeCoordinates(set_color_info& color_info);
 
 void do_for_fkey(sf::Keyboard::Key key, Fractals& fractals);
 int from_key_to_index(sf::Keyboard::Key key, sf::Keyboard::Key start, sf::Keyboard::Key end);
+
+bool handle_command_cin(set_color_info& color_info);
 
 int main(){
     sf::RenderWindow window(sf::VideoMode({ WIDTH, HEIGHT }), "Fractal", sf::State::Fullscreen);
@@ -413,6 +416,10 @@ int main(){
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F12)) {
                     do_for_fkey(sf::Keyboard::Key::F12, fractals);
                 }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::C)) {
+                    bool command_executed = handle_command_cin(color_info);
+                    printf("command executed %d\n", command_executed);
+                }
             }
             if (const auto* mouseClick = e.getIf<sf::Event::MouseButtonPressed>()) {
                 sf::Vector2i v = mouseClick->position;
@@ -466,6 +473,17 @@ int main(){
     }
     cudaFree(run_info.gpu_reserved_memory);
     return 0;
+}
+bool handle_command_cin(set_color_info& color_info) {
+    std::string command;
+    std::cin >> command;
+    if (command == "set_nr") {
+        int nr;
+        std::cin >> nr;
+        color_info.nr = nr;
+        return true;
+    }
+    return false;
 }
 void do_for_fkey(sf::Keyboard::Key key, Fractals& fractals) {
     int index = from_key_to_index(key, sf::Keyboard::Key::F3, sf::Keyboard::Key::F12);
@@ -623,6 +641,23 @@ __global__ void set_number_for_color_julia(set_color_info info) {
         complex one{1, 0}; 
         current.real = real;
         current.imag = imag;
+    )
+}
+__global__ void set_number_for_color_mj_variant(set_color_info info) {
+        CUDA_FRACTAL_PREV_GET_NEXT(
+        16.0f, 
+        x_ = current.real;
+        y_ = current.imag;
+        p2x = x_ * x_;
+        p3x = p2x * x_;
+        p4x = p2x * p2x;
+        p2y = y_ * y_;
+        p3y = p2y * y_;
+        p4y = p2y * p2y;
+        next.real = p4x + 6 * p2x * p2y + p4y + real;
+        next.imag = -4 * x_ * p3y + 4 * p3x * y_ + imag;
+        ;, 
+        double p2x, p3x, p4x, p2y, p3y, p4y, x_, y_;
     )
 }
 
